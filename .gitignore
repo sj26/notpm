@@ -1,0 +1,5 @@
+# Ignore downloaded package data
+/db
+
+# Ignore tmp files
+/tmp

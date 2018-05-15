@@ -1,0 +1,118 @@
+#!/usr/bin/env ruby
+
+USAGE = <<~USAGE
+  bin/mirror --all
+    Mirror all NPM packages, gracefully resuming via tmp/sequence
+  
+  bin/mirror PACKAGE...
+    Mirror specific package name(s), like `jquery`
+  
+  bin/mirror --deps PACKAGE...
+    mirror the specified packages names plus all dependencies, recursively
+USAGE
+
+require "http"
+require "json"
+
+def mirror(id, doc)
+  puts "Mirroring #{id}"
+  urls = doc["versions"].reject do |version, hash|
+    url = hash["dist"]["tarball"]
+    shasum = hash["dist"]["shasum"]
+    name = File.basename(url)
+    path = File.join("db", id, name)
+    (shasum && File.exist?(path) && Digest::SHA1.file(path).hexdigest == shasum).tap do |reject|
+      puts "Already downloaded #{id}/#{name}" if reject
+    end
+  end.map do |_, hash|
+    hash["dist"]["tarball"]
+  end
+
+  if urls.any?
+    puts "Downloading #{id} attachments..."
+    system "aria2c", "--force-sequential", "--conditional-get", "--remote-time", "--allow-overwrite", "--max-concurrent-downloads=5", "--max-connection-per-server=5", "--dir", File.join("db", id), *urls
+  end
+
+  puts "Rewriting dist urls"
+  doc["versions"].each do |version, hash|
+    hash["dist"]["tarball"] = "http://npm.railscamp.local/#{id}/-/#{File.basename(hash["dist"]["tarball"])}"
+  end
+
+  puts "Writing #{id} to database"
+  File.write(File.join("db", "#{id}.json"), JSON.generate(doc))
+end
+
+if ARGV.empty?
+  puts USAGE
+  exit 1
+elsif ARGV.include?("--help")
+  puts USAGE
+  exit
+elsif ARGV.include?("--all")
+  puts "Fetching all packages..."
+
+  sequence = nil
+  sequence_path = "tmp/sequence"
+  if File.exist?(sequence_path)
+    sequence = File.read(sequence_path).chomp
+    puts "Resuming from #{sequence} (from #{sequence_path})"
+  end
+
+  # Iterate every document in the registry database
+  Enumerator.new do |yielder|
+    url = "https://skimdb.npmjs.com/registry/_changes"
+    params = {include_docs: true, limit: 10}
+    params[:since] = sequence if sequence
+
+    while 
+      response = HTTP.get("https://skimdb.npmjs.com/registry/_changes", params: params)
+
+      unless response.code == 200
+	p response
+	break
+      end
+
+      response.parse.fetch("results").each do |result|
+	yielder.yield result
+      end
+
+      params[:since] = response.parse.fetch("last_seq")
+    end
+  end.lazy.reject do |change|
+    change.fetch("id").start_with?("_design/").tap { |reject| puts "Rejecting design document #{change.fetch("id")}, sequence #{change.fetch("seq")}" if reject }
+  end.lazy.reject do |change|
+    change.fetch("deleted", false).tap { |reject| puts "Rejecting deleted document #{change.fetch("id")}, sequence #{change.fetch("seq")}" if reject }
+  end.lazy.each do |change|
+    id = change.fetch("id")
+    doc = change.fetch("doc")
+    seq = change.fetch("seq")
+
+    mirror(id, doc)
+
+    puts "Finished change #{id}, sequence #{seq}"
+    File.write(sequence_path, seq)
+  end
+else
+  also_deps = !ARGV.delete("--deps").nil?
+  done = [].to_set
+  want = [*ARGV]
+  while id = want.shift
+    puts "Fetching #{id}"
+    response = HTTP.get("https://skimdb.npmjs.com/registry/#{id}")
+    done << id
+    if response.code != 200
+      puts "Failed to fetch #{id}:", response.inspect
+      next
+    else
+      mirror(id, response.parse)
+    end
+    
+    if also_deps
+      doc = JSON.parse(File.read("db/#{id}.json"))
+      all_deps = doc["versions"].values.flat_map { |hash| hash["dependencies"]&.keys }.compact.to_set
+      want_deps = (all_deps - done).to_a
+      puts "Adding dependencies: #{want_deps.join(", ")}"
+      want.concat(want_deps)
+    end
+  end
+end

@@ -1,0 +1,24 @@
+<html>
+<head>
+<title>NPM</title>
+<link rel="stylesheet" href="/assets/normalize.css" />
+<link rel="stylesheet" href="/assets/application.css" />
+</head>
+<body>
+<h1>NPM</h1>
+<p>To install packages from here:</p>
+<pre>npm install --registry http://npm.railscamp.local [PACKAGE...]</pre>
+<p>Or tell npm to use this as a mirror:</p>
+<pre>npm config set registry http://npm.railscamp.local</pre>
+<h2>When you get home</h2>
+<p>NPM will continue to use this mirror until you tell it to stop. Run:</p>
+<pre>npm config delete registry</pre>
+<h2>Yarn</h2>
+<p>Yarn works pretty much the same as NPM. You can do a once-off using:</p>
+<pre>yarn install --registry http://npm.railscamp.local</pre>
+<p>Or configure it to use this registry for a while:</p>
+<pre>yarn config set registry http://npm.railscamp.local</pre>
+<p>Remember to undo it again when you get home:</p>
+<pre>yarn config delete registry</pre>
+</body>
+</html>
