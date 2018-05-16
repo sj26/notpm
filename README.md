@@ -38,18 +38,18 @@ The application is built with [Ruby](http://ruby-lang.org) and [Sinatra](http://
 # Install dependencies
 bundle
 
-# Run the http server, http://localhost:3000 by default
+# Run the http server, http://localhost:9292 by default
 rackup
 ```
 
 Then you can install packages by pointing at the registry:
 
 ```
-npm install --registry=http://localhost:3000
+npm install --registry=http://localhost:9292
 ```
 
 ```
-yarn install --registry=http://localhost:3000
+yarn install --registry=http://localhost:9292
 ```
 
 It really just serves the json files from `http://.../[name]` and the tarballs from `http://.../[name]/-/[name]-[version].tgz` by using sendfile. You could probably also create a clever nginx setup which does the same thing directly from a directory.
