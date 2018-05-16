@@ -5,10 +5,6 @@ class Notpm < Sinatra::Base
   # npm's "Referer: install <package>" header triggers JsonCsrf
   set :protection, except: [:json_csrf]
 
-  get "/" do
-    send_file "public/index.html"
-  end
-
   get "/:id" do |id|
     path = File.join("db", "#{id}.json")
     if File.exist? path
