@@ -6,7 +6,7 @@ class Notpm < Sinatra::Base
   set :protection, except: [:json_csrf]
 
   get "/:id" do |id|
-    path = File.join("db", "#{id}.json")
+    path = File.join("db", "package", "#{id}.json")
     if File.exist? path
       send_file path
     else
@@ -15,7 +15,7 @@ class Notpm < Sinatra::Base
   end
 
   get "/:id/-/:filename" do |id, filename|
-    path = File.join("db", id, filename)
+    path = File.join("db", "dist", id, filename)
     if File.exist? path
       send_file path
     else

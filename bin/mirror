@@ -20,7 +20,7 @@ def mirror(id, doc)
     url = hash["dist"]["tarball"]
     shasum = hash["dist"]["shasum"]
     name = File.basename(url)
-    path = File.join("db", id, name)
+    path = File.join("db", "dist", id, name)
     (shasum && File.exist?(path) && Digest::SHA1.file(path).hexdigest == shasum).tap do |reject|
       puts "Already downloaded #{id}/#{name}" if reject
     end
@@ -30,7 +30,7 @@ def mirror(id, doc)
 
   if urls.any?
     puts "Downloading #{id} attachments..."
-    system "aria2c", "--force-sequential", "--conditional-get", "--remote-time", "--allow-overwrite", "--max-concurrent-downloads=5", "--max-connection-per-server=5", "--dir", File.join("db", id), *urls
+    system "aria2c", "--force-sequential", "--conditional-get", "--remote-time", "--allow-overwrite", "--max-concurrent-downloads=5", "--max-connection-per-server=5", "--dir", File.join("db", "dist", id), *urls
   end
 
   puts "Rewriting dist urls"
@@ -39,7 +39,7 @@ def mirror(id, doc)
   end
 
   puts "Writing #{id} to database"
-  File.write(File.join("db", "#{id}.json"), JSON.generate(doc))
+  File.write(File.join("db", "package", "#{id}.json"), JSON.generate(doc))
 end
 
 if ARGV.empty?
@@ -108,7 +108,7 @@ else
     end
     
     if also_deps
-      doc = JSON.parse(File.read("db/#{id}.json"))
+      doc = JSON.parse(File.read("db/package/#{id}.json"))
       all_deps = doc["versions"].values.flat_map { |hash| hash["dependencies"]&.keys }.compact.to_set
       want_deps = (all_deps - done).to_a
       puts "Adding dependencies: #{want_deps.join(", ")}"
