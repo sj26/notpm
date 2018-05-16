@@ -1,5 +1,6 @@
 # Ignore downloaded package data
 /db
 
-# Ignore tmp files
+# Ignore logs and tmp files
+/log/*.log
 /tmp
