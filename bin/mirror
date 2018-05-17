@@ -13,33 +13,49 @@ USAGE
 
 require "http"
 require "json"
+require "set"
 
-def mirror(id, doc)
-  puts "Mirroring #{id}"
+def scoped_name(name)
+  if name =~ %r{\A@(.*?)/(.*)\Z}
+    "@#{$1}%2f#{$2}"
+  else
+    name
+  end
+end
+
+def mirror(name, doc)
+  puts "Mirroring package #{name}"
   urls = doc["versions"].reject do |version, hash|
     url = hash["dist"]["tarball"]
     shasum = hash["dist"]["shasum"]
-    name = File.basename(url)
-    path = File.join("db", "dist", id, name)
+    file = File.basename(url)
+    path = File.join("db", "dist", name, file)
     (shasum && File.exist?(path) && Digest::SHA1.file(path).hexdigest == shasum).tap do |reject|
-      puts "Already downloaded #{id}/#{name}" if reject
+      puts "  already downloaded #{name}/#{file}" if reject
     end
   end.map do |_, hash|
     hash["dist"]["tarball"]
   end
 
   if urls.any?
-    puts "Downloading #{id} attachments..."
-    system "aria2c", "--force-sequential", "--conditional-get", "--remote-time", "--allow-overwrite", "--max-concurrent-downloads=5", "--max-connection-per-server=5", "--dir", File.join("db", "dist", id), *urls
+    puts "  downloading attachments..."
+    system "aria2c", "--force-sequential", "--conditional-get", "--remote-time", "--allow-overwrite", "--max-concurrent-downloads=5", "--max-connection-per-server=5", "--dir", File.join("db", "dist", name), *urls
+    #system "wget", "--timestamping", "--directory-prefix", File.join("db", "dist", name), *urls
   end
 
-  puts "Rewriting dist urls"
+  puts "  rewriting dist urls"
   doc["versions"].each do |version, hash|
-    hash["dist"]["tarball"] = "http://npm.railscamp.local/#{id}/-/#{File.basename(hash["dist"]["tarball"])}"
+    hash["dist"]["tarball"] = "http://npm.railscamp.local/#{name}/-/#{File.basename(hash["dist"]["tarball"])}"
   end
 
-  puts "Writing #{id} to database"
-  File.write(File.join("db", "package", "#{id}.json"), JSON.generate(doc))
+  # Scoped package
+  if name =~ %r{\A(@.*?)/(.*)\Z} and not Dir.exist?("db/package/#{$1}")
+    puts "  mkdir db/package/#{$1}"
+    Dir.mkdir("db/package/#{$1}")
+  end
+
+  puts "  writing #{name} to database"
+  File.write("db/package/#{name}.json", JSON.generate(doc))
 end
 
 if ARGV.empty?
@@ -49,70 +65,113 @@ elsif ARGV.include?("--help")
   puts USAGE
   exit
 elsif ARGV.include?("--all")
-  puts "Fetching all packages..."
+  puts "Mirroring all packages..."
 
   sequence = nil
   sequence_path = "tmp/sequence"
   if File.exist?(sequence_path)
     sequence = File.read(sequence_path).chomp
-    puts "Resuming from #{sequence} (from #{sequence_path})"
+    puts "  resuming from #{sequence} (from #{sequence_path})"
   end
+
+  url = "https://replicate.npmjs.com"
+
+  # One for fetching package json
+  http = HTTP.persistent(url)
 
   # Iterate every document in the registry database
   Enumerator.new do |yielder|
-    url = "https://skimdb.npmjs.com/registry/_changes"
-    params = {include_docs: true, limit: 10}
+    params = {limit: 100}
     params[:since] = sequence if sequence
 
-    while 
-      response = HTTP.get("https://skimdb.npmjs.com/registry/_changes", params: params)
+    # Fetch chunks of changes since the beginning of time from the database
+    HTTP.persistent(url) do |http|
+      while 
+	response = http.get("/registry/_changes", params: params)
 
-      unless response.code == 200
-	p response
-	break
+	unless response.status.success?
+	  puts "  failed to query upstream:"
+	  puts "    #{response.inspect}"
+	  break
+	end
+
+	response.parse.fetch("results").each do |result|
+	  yielder.yield result
+	end
+
+	params[:since] = response.parse.fetch("last_seq")
       end
-
-      response.parse.fetch("results").each do |result|
-	yielder.yield result
-      end
-
-      params[:since] = response.parse.fetch("last_seq")
     end
   end.lazy.reject do |change|
-    change.fetch("id").start_with?("_design/").tap { |reject| puts "Rejecting design document #{change.fetch("id")}, sequence #{change.fetch("seq")}" if reject }
+    change.fetch("id").start_with?("_design/")
   end.lazy.reject do |change|
-    change.fetch("deleted", false).tap { |reject| puts "Rejecting deleted document #{change.fetch("id")}, sequence #{change.fetch("seq")}" if reject }
+    change.fetch("deleted", false)
   end.lazy.each do |change|
     id = change.fetch("id")
-    doc = change.fetch("doc")
+    #doc = change.fetch("doc")
     seq = change.fetch("seq")
 
-    mirror(id, doc)
+    if File.exist? "db/package/#{id}.json"
+      puts "Skipping #{id}"
+    else
+      doc = http.get("/#{id.sub("/", "%2f")}").parse
+      mirror(id, doc)
+    end
 
-    puts "Finished change #{id}, sequence #{seq}"
     File.write(sequence_path, seq)
   end
+
+  File.remove(sequence_path) if File.exist? sequence_path
+
+  puts "Done!"
 else
-  also_deps = !ARGV.delete("--deps").nil?
-  done = [].to_set
-  want = [*ARGV]
-  while id = want.shift
-    puts "Fetching #{id}"
-    response = HTTP.get("https://skimdb.npmjs.com/registry/#{id}")
-    done << id
-    if response.code != 200
-      puts "Failed to fetch #{id}:", response.inspect
-      next
-    else
-      mirror(id, response.parse)
-    end
-    
-    if also_deps
-      doc = JSON.parse(File.read("db/package/#{id}.json"))
-      all_deps = doc["versions"].values.flat_map { |hash| hash["dependencies"]&.keys }.compact.to_set
-      want_deps = (all_deps - done).to_a
-      puts "Adding dependencies: #{want_deps.join(", ")}"
-      want.concat(want_deps)
+  include_deps = !ARGV.delete("--deps").nil?
+  skip_existing = !ARGV.delete("--skip-existing").nil?
+  done = Set.new
+  want = Set.new(ARGV)
+  HTTP.persistent("https://replicate.npmjs.com") do |http|
+    while name = want.first
+      want.delete(name)
+      done << name
+
+      if skip_existing && File.exist?("db/package/#{name}.json")
+	puts "Already have #{name}"
+	next
+      end
+
+      puts "Querying #{name}"
+      # Scoped packages, @scope/package, need the slash (and the slash only) escaped
+      response = http.get("/#{name.sub("/", "%2f")}")
+      if response.code != 200
+	puts "  failed to fetch #{name}:"
+	puts "    #{response.inspect}"
+	response.flush
+	next
+      else
+	mirror(name, response.parse)
+	response.flush
+      end
+      
+      if include_deps
+	walked = Set.new(done)
+	walk = Set.new([name])
+	while name = walk.first
+	  walk.delete name
+	  walked << name
+	  puts "  including dependencies for #{name}"
+	  doc = JSON.parse(File.read("db/package/#{name}.json"))
+	  all_deps = Set.new(doc["versions"].values.flat_map { |hash| hash["dependencies"]&.keys }.compact)
+	  want_deps = all_deps - walked
+	  already_deps, want_deps = want_deps.partition { |dep| File.exist? "db/package/#{dep}.json" }.map(&:to_set)
+	  puts "    already have: #{already_deps.to_a.join(", ")}" if already_deps.any?
+	  walk.merge already_deps - walked
+	  #already_deps.each { |already| mirror(already, JSON.parse(File.read("db/package/#{dep}.json"))) }
+	  puts "    want: #{want_deps.to_a.join(", ")}" if want_deps.any?
+	  want.merge want_deps
+	end
+      end
     end
   end
+
+  puts "Done!"
 end
